@@ -19,3 +19,9 @@ python writer.py \
     --s3-bucket cs439-project-bucket \
     --s3-prefix experiments/run1
 ```
+
+## File Size
+
+A file containing 160,000,000 data (1000000 rows * 160 columns) is 2.2GB.
+
+We will try to keep our per file data under 2GB.

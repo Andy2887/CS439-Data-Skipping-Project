@@ -58,7 +58,7 @@ import pyarrow.parquet as pq
 # Configuration
 # ---------------------------------------------------------------------------
 
-PREDICATE_TYPES = ("equality", "inequality", "range")
+PREDICATE_TYPES = ("equality", "greater_than", "less_than", "range")
 
 
 @dataclass
@@ -77,8 +77,8 @@ class GeneratorConfig:
     row_group_size: int = 100_000
 
     # Predicate specification
-    predicate_type: str = "equality"  # equality | inequality | range
-    predicate_value: int = 42  # single value for equality/inequality
+    predicate_type: str = "equality"  # equality | greater_than | less_than | range
+    predicate_value: int = 42  # single value for equality/greater_than/less_than
     predicate_upper: Optional[int] = None  # upper bound for range predicates
 
     # Output (S3 only)
@@ -147,8 +147,10 @@ def _matching_mask(
     """Return a boolean mask: True where `values` satisfy the predicate."""
     if predicate_type == "equality":
         return values == predicate_value
-    elif predicate_type == "inequality":
+    elif predicate_type == "greater_than":
         return values > predicate_value
+    elif predicate_type == "less_than":
+        return values < predicate_value
     elif predicate_type == "range":
         return (values >= predicate_value) & (values <= predicate_upper)
     else:
@@ -462,7 +464,7 @@ def parse_args() -> GeneratorConfig:
     )
 
     p.add_argument("--total-rows", type=int, default=1_000_000,
-                    help="Number of rows per file")
+                    help="Total number of rows per file")
     p.add_argument("--num-files", type=int, default=1,
                     help="Number of Parquet files to generate")
     p.add_argument("--clustering-ratio", type=float, default=0.0,
