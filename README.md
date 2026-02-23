@@ -22,6 +22,6 @@ python writer.py \
 
 ## File Size
 
-A file containing 160,000,000 data (1000000 rows * 160 columns) is 2.2GB.
+A file containing 160,000,000 data (1000000 rows * 80 columns) is 1.1GB.
 
-We will try to keep our per file data under 2GB.
+We will try to keep our per file data under 1GB.
