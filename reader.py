@@ -76,6 +76,13 @@ def run_query(s3_path, query_type, value1, value2, data_skipping):
     print(f"Row groups skipped: {groups_skipped}")
     print(f"Execution time: {elapsed:.4f} seconds")
 
+    return {
+        "total_matches": total_count,
+        "groups_read": groups_read,
+        "groups_skipped": groups_skipped,
+        "execution_time": elapsed,
+    }
+
 
 def main():
     if len(sys.argv) < 5:
