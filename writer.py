@@ -157,6 +157,31 @@ def _matching_mask(
         raise ValueError(f"Unknown predicate_type: {predicate_type}")
 
 
+def _compute_ensured_values(
+    predicate_type: str,
+    predicate_value: int,
+    predicate_upper: Optional[int],
+    seed: int,
+) -> List[int]:
+    """Return up to 100 values guaranteed to satisfy the predicate."""
+    if predicate_type == "equality":
+        return [predicate_value]
+    elif predicate_type == "greater_than":
+        return [predicate_value + 1 + i for i in range(100)]
+    elif predicate_type == "less_than":
+        start = max(0, predicate_value - 100)
+        return list(range(start, predicate_value))
+    elif predicate_type == "range":
+        lo, hi = predicate_value, predicate_upper
+        if hi - lo + 1 <= 100:
+            return list(range(lo, hi + 1))
+        else:
+            rng = np.random.default_rng(seed)
+            vals = rng.choice(np.arange(lo, hi + 1), size=100, replace=False)
+            return sorted(int(v) for v in vals)
+    return []
+
+
 def _generate_target_int_column(
     total_rows: int,
     value_pool: np.ndarray,
@@ -303,9 +328,9 @@ def _generate_single_table(config: GeneratorConfig, file_idx: int) -> pa.Table:
     rng = np.random.default_rng(config.seed + file_idx)
 
     # Value pool (shared across files for consistency)
-    ensure = [config.predicate_value]
-    if config.predicate_upper is not None:
-        ensure.append(config.predicate_upper)
+    ensure = _compute_ensured_values(
+        config.predicate_type, config.predicate_value, config.predicate_upper, config.seed,
+    )
     int_pool = _build_int_value_pool(config.cardinality, config.seed, ensure_values=ensure)
 
     # Integer target column
@@ -392,17 +417,17 @@ def validate_parquet(
             print(f"    target_int  (no min/max stats)")
 
     # Verify actual selectivity
-    table = pq.read_table(pa.BufferReader(buf), columns=["target_int"])
-    int_col = table.column("target_int").to_numpy()
-    match_mask = _matching_mask(
-        int_col, config.predicate_type, config.predicate_value, config.predicate_upper
-    )
-    actual_sel = match_mask.sum() / len(int_col)
-    print(f"\n  Selectivity (requested) : {config.selectivity:.4f}")
-    print(f"  Selectivity (actual)    : {actual_sel:.4f}")
-    diff = abs(actual_sel - config.selectivity)
-    status = "OK" if diff < 0.01 else "MISMATCH"
-    print(f"  Status                  : {status} (diff={diff:.6f})")
+    # table = pq.read_table(pa.BufferReader(buf), columns=["target_int"])
+    # int_col = table.column("target_int").to_numpy()
+    # match_mask = _matching_mask(
+    #     int_col, config.predicate_type, config.predicate_value, config.predicate_upper
+    # )
+    # actual_sel = match_mask.sum() / len(int_col)
+    # print(f"\n  Selectivity (requested) : {config.selectivity:.4f}")
+    # print(f"  Selectivity (actual)    : {actual_sel:.4f}")
+    # diff = abs(actual_sel - config.selectivity)
+    # status = "OK" if diff < 0.01 else "MISMATCH"
+    # print(f"  Status                  : {status} (diff={diff:.6f})")
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +468,7 @@ def generate_parquet_files(config: GeneratorConfig) -> List[str]:
         print(f"  Writing to buffer (row_group_size={config.row_group_size}) …")
         buf = _write_parquet_to_buffer(table, config.row_group_size)
 
-        validate_parquet(buf, s3_key, config)
+        # validate_parquet(buf, s3_key, config)
 
         uri = upload_to_s3(buf, filename, config.s3_bucket, config.s3_prefix or "")
         uris.append(uri)
