@@ -1,14 +1,12 @@
 """
-run_experiments.py — Batch orchestrator for Parquet data-skipping benchmarks.
+run.py — Batch orchestrator for Parquet data-skipping benchmarks.
 
-Reads a TSV plan file, runs writer + reader for each row, and collects
+Reads a CSV plan file, runs writer + reader for each row, and collects
 results into a CSV file (wide format: one row per experiment).
 
 Usage:
-    python run_experiments.py \
-        --plan plan.tsv \
-        --s3-prefix-base experiments \
-        --output results.csv \
+    python run.py \
+        [--plan PLAN] [--s3-prefix-base PREFIX] [--output PATH] \
         [--s3-bucket BUCKET] [--total-rows N] [--num-files N] \
         [--table-width N] [--seed N]
 """
@@ -166,12 +164,12 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    p.add_argument("--plan", required=True, help="Path to TSV plan file")
+    p.add_argument("--plan", default="plan/plan.csv", help="Path to TSV plan file")
     p.add_argument("--s3-bucket", default="cs439-project-bucket",
                    help="S3 bucket for all experiments")
     p.add_argument("--s3-prefix-base", default="experiments",
                    help="Base S3 prefix; each run gets {base}/{timestamp}/run_{NNN}")
-    p.add_argument("--output", default="results.csv", help="Output CSV path")
+    p.add_argument("--output", default="output/results.csv", help="Output CSV path")
 
     # Batch-level defaults (override GeneratorConfig defaults, overridden by plan)
     p.add_argument("--total-rows", type=int, default=None)
