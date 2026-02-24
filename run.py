@@ -6,8 +6,7 @@ results into a CSV file (wide format: one row per experiment).
 
 Usage:
     python run.py \
-        [--plan PLAN] [--s3-prefix-base PREFIX] [--output PATH] \
-        [--s3-bucket BUCKET] [--total-rows N] [--num-files N] \
+        [--total-rows N] [--num-files N] \
         [--table-width N] [--seed N]
 """
 
@@ -15,13 +14,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
 import traceback
 from datetime import datetime
 from typing import Any, Dict
 
+import boto3
+
 from writer import GeneratorConfig, generate_parquet_files
 from reader import run_query
+
+S3_BUCKET = "cs439-project-bucket"
+S3_PLAN_KEY = "plan/plan.csv"
 
 # ---------------------------------------------------------------------------
 # Type coercion map for GeneratorConfig fields
@@ -81,34 +86,36 @@ CSV_COLUMNS = (
 # Plan file parsing
 # ---------------------------------------------------------------------------
 
-def parse_plan(plan_path: str) -> list[dict[str, Any]]:
-    """Read a CSV plan file and return a list of per-row override dicts.
+def parse_plan(s3_bucket: str, s3_key: str) -> list[dict[str, Any]]:
+    """Read a CSV plan file from S3 and return a list of per-row override dicts.
 
     Plan columns map to GeneratorConfig fields:
       predicate_value_1 → predicate_value
       predicate_value_2 → predicate_upper  (nan means unused)
     """
-    with open(plan_path, newline="") as f:
-        reader = csv.DictReader(f)
+    s3 = boto3.client("s3")
+    obj = s3.get_object(Bucket=s3_bucket, Key=s3_key)
+    body = obj["Body"].read().decode("utf-8")
+    reader = csv.DictReader(io.StringIO(body))
 
-        # Validate column names
-        for col in reader.fieldnames or []:
+    # Validate column names
+    for col in reader.fieldnames or []:
+        if col not in FIELD_TYPES:
+            print(f"Warning: unknown plan column '{col}' (will be ignored)")
+
+    rows = []
+    for raw_row in reader:
+        coerced: Dict[str, Any] = {}
+        for col, val in raw_row.items():
             if col not in FIELD_TYPES:
-                print(f"Warning: unknown plan column '{col}' (will be ignored)")
+                continue
+            val = val.strip() if val else ""
+            if val == "" or val.lower() == "nan":
+                continue  # use default
+            coerced[col] = FIELD_TYPES[col](val)
+        rows.append(coerced)
 
-        rows = []
-        for raw_row in reader:
-            coerced: Dict[str, Any] = {}
-            for col, val in raw_row.items():
-                if col not in FIELD_TYPES:
-                    continue
-                val = val.strip() if val else ""
-                if val == "" or val.lower() == "nan":
-                    continue  # use default
-                coerced[col] = FIELD_TYPES[col](val)
-            rows.append(coerced)
-
-    print(f"Loaded {len(rows)} experiment(s) from {plan_path}")
+    print(f"Loaded {len(rows)} experiment(s) from s3://{s3_bucket}/{s3_key}")
     return rows
 
 
@@ -164,13 +171,6 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    p.add_argument("--plan", default="plan/plan.csv", help="Path to TSV plan file")
-    p.add_argument("--s3-bucket", default="cs439-project-bucket",
-                   help="S3 bucket for all experiments")
-    p.add_argument("--s3-prefix-base", default="experiments",
-                   help="Base S3 prefix; each run gets {base}/{timestamp}/run_{NNN}")
-    p.add_argument("--output", default="output/results.csv", help="Output CSV path")
-
     # Batch-level defaults (override GeneratorConfig defaults, overridden by plan)
     p.add_argument("--total-rows", type=int, default=None)
     p.add_argument("--table-width", type=int, default=None)
@@ -197,81 +197,85 @@ def cli_defaults_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
-    plan_rows = parse_plan(args.plan)
+    plan_rows = parse_plan(S3_BUCKET, S3_PLAN_KEY)
     cli_defs = cli_defaults_from_args(args)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    s3_result_key = f"result/{timestamp}/results.csv"
 
-    # Open CSV for incremental writing
-    csv_file = open(args.output, "w", newline="")
-    writer = csv.DictWriter(csv_file, fieldnames=CSV_COLUMNS)
+    # Build CSV in memory so we can upload to S3
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=CSV_COLUMNS)
     writer.writeheader()
-    csv_file.flush()
 
-    try:
-        for idx, plan_row in enumerate(plan_rows):
-            s3_prefix = f"{args.s3_prefix_base}/{timestamp}/run_{idx:03d}"
+    for idx, plan_row in enumerate(plan_rows):
+        s3_prefix = f"experiments/{timestamp}/run_{idx:03d}"
 
-            print(f"\n{'='*60}")
-            print(f"  Experiment {idx} / {len(plan_rows) - 1}")
-            print(f"  S3 prefix: s3://{args.s3_bucket}/{s3_prefix}")
-            print(f"  Plan overrides: {plan_row}")
-            print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"  Experiment {idx} / {len(plan_rows) - 1}")
+        print(f"  S3 prefix: s3://{S3_BUCKET}/{s3_prefix}")
+        print(f"  Plan overrides: {plan_row}")
+        print(f"{'='*60}")
 
-            csv_row: Dict[str, Any] = {"run_index": idx, "error": ""}
+        csv_row: Dict[str, Any] = {"run_index": idx, "error": ""}
 
-            try:
-                config = build_config(plan_row, cli_defs, args.s3_bucket, s3_prefix)
+        try:
+            config = build_config(plan_row, cli_defs, S3_BUCKET, s3_prefix)
 
-                # Record writer params
-                for col in WRITER_PARAM_COLS:
-                    config_key = PLAN_TO_CONFIG.get(col, col)
-                    val = getattr(config, config_key, "")
-                    # Show nan for unused predicate_value_2
-                    if col == "predicate_value_2" and val is None:
-                        val = "nan"
-                    csv_row[col] = val
+            # Record writer params
+            for col in WRITER_PARAM_COLS:
+                config_key = PLAN_TO_CONFIG.get(col, col)
+                val = getattr(config, config_key, "")
+                # Show nan for unused predicate_value_2
+                if col == "predicate_value_2" and val is None:
+                    val = "nan"
+                csv_row[col] = val
 
-                # --- Write ---
-                print("\n>>> Running writer …")
-                generate_parquet_files(config)
+            # --- Write ---
+            print("\n>>> Running writer …")
+            generate_parquet_files(config)
 
-                # --- Reader query args ---
-                s3_data_path = f"{args.s3_bucket}/{config.s3_prefix}"
-                reader_query_type = PREDICATE_TYPE_MAP.get(
-                    config.predicate_type, config.predicate_type
-                )
-                value1 = config.predicate_value
-                value2 = config.predicate_upper  # None for non-range
+            # --- Reader query args ---
+            s3_data_path = f"{S3_BUCKET}/{config.s3_prefix}"
+            reader_query_type = PREDICATE_TYPE_MAP.get(
+                config.predicate_type, config.predicate_type
+            )
+            value1 = config.predicate_value
+            value2 = config.predicate_upper  # None for non-range
 
-                # --- Read with data skipping ---
-                print("\n>>> Running reader (data_skipping=True) …")
-                skip_metrics = run_query(
-                    s3_data_path, reader_query_type, value1, value2, data_skipping=True
-                )
-                for k in METRIC_KEYS:
-                    csv_row[f"skip_{k}"] = skip_metrics[k]
+            # --- Read with data skipping ---
+            print("\n>>> Running reader (data_skipping=True) …")
+            skip_metrics = run_query(
+                s3_data_path, reader_query_type, value1, value2, data_skipping=True
+            )
+            for k in METRIC_KEYS:
+                csv_row[f"skip_{k}"] = skip_metrics[k]
 
-                # --- Read without data skipping ---
-                print("\n>>> Running reader (data_skipping=False) …")
-                noskip_metrics = run_query(
-                    s3_data_path, reader_query_type, value1, value2, data_skipping=False
-                )
-                for k in METRIC_KEYS:
-                    csv_row[f"noskip_{k}"] = noskip_metrics[k]
+            # --- Read without data skipping ---
+            print("\n>>> Running reader (data_skipping=False) …")
+            noskip_metrics = run_query(
+                s3_data_path, reader_query_type, value1, value2, data_skipping=False
+            )
+            for k in METRIC_KEYS:
+                csv_row[f"noskip_{k}"] = noskip_metrics[k]
 
-            except Exception:
-                tb = traceback.format_exc()
-                print(f"\n!!! Experiment {idx} failed:\n{tb}")
-                csv_row["error"] = tb.splitlines()[-1]
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"\n!!! Experiment {idx} failed:\n{tb}")
+            csv_row["error"] = tb.splitlines()[-1]
 
-            writer.writerow(csv_row)
-            csv_file.flush()
+        writer.writerow(csv_row)
 
-    finally:
-        csv_file.close()
+    # Upload results CSV to S3
+    s3 = boto3.client("s3")
+    s3.upload_fileobj(
+        io.BytesIO(csv_buf.getvalue().encode("utf-8")),
+        S3_BUCKET,
+        s3_result_key,
+    )
 
-    print(f"\nAll experiments complete. Results written to {args.output}")
+    print(f"\nAll experiments complete. Results uploaded to "
+          f"s3://{S3_BUCKET}/{s3_result_key}")
 
 
 if __name__ == "__main__":

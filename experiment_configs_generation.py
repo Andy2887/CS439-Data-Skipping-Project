@@ -1,10 +1,15 @@
 import csv
-import os
-from scipy.stats.qmc import LatinHypercube
+import io
+import sys
+
+import boto3
 import numpy as np
+from scipy.stats.qmc import LatinHypercube
+
+n_configs = int(sys.argv[1]) if len(sys.argv) > 1 else 100
 
 sampler = LatinHypercube(d=5, seed=42)
-sample = sampler.random(n=100)  # 100 points in [0,1]^5
+sample = sampler.random(n=n_configs)
 
 # Map each dimension back to your discrete levels
 clustering_levels = [0.0, 1.0]
@@ -36,13 +41,23 @@ for row in sample:
         "predicate_value_2": v2,
     })
 
-os.makedirs("plan", exist_ok=True)
+S3_BUCKET = "cs439-project-bucket"
+S3_KEY = "plan/plan.csv"
+
 fieldnames = ["clustering_ratio", "selectivity", "cardinality", "row_group_size",
               "predicate_type", "predicate_value_1", "predicate_value_2"]
-with open("plan/plan.csv", "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(configs)
 
-print(f"Wrote {len(configs)} configs to plan/plan.csv")
+csv_buf = io.StringIO()
+writer = csv.DictWriter(csv_buf, fieldnames=fieldnames)
+writer.writeheader()
+writer.writerows(configs)
+
+s3 = boto3.client("s3")
+s3.upload_fileobj(
+    io.BytesIO(csv_buf.getvalue().encode("utf-8")),
+    S3_BUCKET,
+    S3_KEY,
+)
+
+print(f"Wrote {len(configs)} configs to s3://{S3_BUCKET}/{S3_KEY}")
 
