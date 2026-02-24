@@ -71,13 +71,19 @@ WRITER_PARAM_COLS = [
     "s3_prefix",
 ]
 
-METRIC_KEYS = ["total_matches", "groups_read", "groups_skipped", "execution_time"]
+NUM_RUNS = 3
+
+METRIC_KEYS = ["total_matches", "groups_read", "groups_skipped"]
 
 CSV_COLUMNS = (
     ["run_index"]
     + WRITER_PARAM_COLS
     + [f"skip_{k}" for k in METRIC_KEYS]
+    + [f"skip_execution_time_{i}" for i in range(1, NUM_RUNS + 1)]
+    + ["skip_avg_execution_time"]
     + [f"noskip_{k}" for k in METRIC_KEYS]
+    + [f"noskip_execution_time_{i}" for i in range(1, NUM_RUNS + 1)]
+    + ["noskip_avg_execution_time"]
     + ["error"]
 )
 
@@ -244,20 +250,28 @@ def main() -> None:
             value2 = config.predicate_upper  # None for non-range
 
             # --- Read with data skipping ---
-            print("\n>>> Running reader (data_skipping=True) …")
+            print(f"\n>>> Running reader (data_skipping=True, {NUM_RUNS} runs) …")
             skip_metrics = run_query(
-                s3_data_path, reader_query_type, value1, value2, data_skipping=True
+                s3_data_path, reader_query_type, value1, value2,
+                data_skipping=True, num_runs=NUM_RUNS,
             )
             for k in METRIC_KEYS:
                 csv_row[f"skip_{k}"] = skip_metrics[k]
+            for i, t in enumerate(skip_metrics["execution_times"]):
+                csv_row[f"skip_execution_time_{i + 1}"] = t
+            csv_row["skip_avg_execution_time"] = skip_metrics["avg_execution_time"]
 
             # --- Read without data skipping ---
-            print("\n>>> Running reader (data_skipping=False) …")
+            print(f"\n>>> Running reader (data_skipping=False, {NUM_RUNS} runs) …")
             noskip_metrics = run_query(
-                s3_data_path, reader_query_type, value1, value2, data_skipping=False
+                s3_data_path, reader_query_type, value1, value2,
+                data_skipping=False, num_runs=NUM_RUNS,
             )
             for k in METRIC_KEYS:
                 csv_row[f"noskip_{k}"] = noskip_metrics[k]
+            for i, t in enumerate(noskip_metrics["execution_times"]):
+                csv_row[f"noskip_execution_time_{i + 1}"] = t
+            csv_row["noskip_avg_execution_time"] = noskip_metrics["avg_execution_time"]
 
         except Exception:
             tb = traceback.format_exc()

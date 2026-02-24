@@ -31,39 +31,47 @@ def matches(value, query_type, value1, value2):
     return False
 
 
-def run_query(s3_path, query_type, value1, value2, data_skipping):
+def run_query(s3_path, query_type, value1, value2, data_skipping, num_runs=3):
     s3 = fs.S3FileSystem(region="us-east-2")
     file_infos = s3.get_file_info(fs.FileSelector(s3_path))
     parquet_files = sorted(
         info.path for info in file_infos if info.path.endswith(".parquet")
     )
 
-    total_count = 0
-    groups_read = 0
-    groups_skipped = 0
+    execution_times = []
 
-    start = time.time()
+    for run_idx in range(num_runs):
+        total_count = 0
+        groups_read = 0
+        groups_skipped = 0
 
-    for path in parquet_files:
-        pf = pq.ParquetFile(s3.open_input_file(path))
-        metadata = pf.metadata
-        num_row_groups = metadata.num_row_groups
+        start = time.time()
 
-        for i in range(num_row_groups):
-            if data_skipping:
-                stats = metadata.row_group(i).column(0).statistics
-                if should_skip(stats, query_type, value1, value2):
-                    groups_skipped += 1
-                    continue
+        for path in parquet_files:
+            pf = pq.ParquetFile(s3.open_input_file(path))
+            metadata = pf.metadata
+            num_row_groups = metadata.num_row_groups
 
-            table = pf.read_row_group(
-                i, columns=[metadata.row_group(i).column(0).path_in_schema]
-            )
-            col = table.column(0).to_pylist()
-            total_count += sum(1 for v in col if matches(v, query_type, value1, value2))
-            groups_read += 1
+            for i in range(num_row_groups):
+                if data_skipping:
+                    stats = metadata.row_group(i).column(0).statistics
+                    if should_skip(stats, query_type, value1, value2):
+                        groups_skipped += 1
+                        continue
 
-    elapsed = time.time() - start
+                table = pf.read_row_group(
+                    i, columns=[metadata.row_group(i).column(0).path_in_schema]
+                )
+                col = table.column(0).to_pylist()
+                total_count += sum(1 for v in col if matches(v, query_type, value1, value2))
+                groups_read += 1
+
+        elapsed = time.time() - start
+        execution_times.append(elapsed)
+
+        print(f"  Run {run_idx + 1}/{num_runs}: {elapsed:.4f} seconds")
+
+    avg_time = sum(execution_times) / len(execution_times)
 
     print(f"Query type: {query_type}")
     if query_type == "range":
@@ -74,13 +82,16 @@ def run_query(s3_path, query_type, value1, value2, data_skipping):
     print(f"Total matches: {total_count}")
     print(f"Row groups read: {groups_read}")
     print(f"Row groups skipped: {groups_skipped}")
-    print(f"Execution time: {elapsed:.4f} seconds")
+    for i, t in enumerate(execution_times):
+        print(f"Execution time {i + 1}: {t:.4f} seconds")
+    print(f"Average execution time: {avg_time:.4f} seconds")
 
     return {
         "total_matches": total_count,
         "groups_read": groups_read,
         "groups_skipped": groups_skipped,
-        "execution_time": elapsed,
+        "execution_times": execution_times,
+        "avg_execution_time": avg_time,
     }
 
 
