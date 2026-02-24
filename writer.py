@@ -128,7 +128,7 @@ def _build_int_value_pool(
     all_ensured = ensure_values + ensure_non_matching
 
     # Range must cover the ensured values
-    upper = max(all_ensured, default=0) + cardinality + rng.integers(0, 10_000_001)
+    upper = max(max(all_ensured, default=0) + cardinality, 10_000_000)
 
     # Start with the guaranteed values
     pool_set = set(all_ensured)
