@@ -6,13 +6,16 @@ import boto3
 import numpy as np
 from scipy.stats.qmc import LatinHypercube
 
-n_configs = int(sys.argv[1]) if len(sys.argv) > 1 else 90
+n_configs = int(sys.argv[1]) if len(sys.argv) > 1 else 180
 
 sampler = LatinHypercube(d=5, seed=42)
 sample = sampler.random(n=n_configs)
 
 # Map each dimension back to your discrete levels
 # Total combinations: 720
+
+# Screening phase: Use a Latin Hypercube sample of 180 configurations (with 3 reps each = 540 runs). Train my GBR, identify the 2–3 most influential parameters.
+# Deep-dive phase: Do a full grid over just the top parameters (fixing others at representative values) to precisely map the break-even surface.
 clustering_levels = [0.0, 0.25, 0.5, 0.75, 1.0]
 selectivity_levels = [0.05, 0.20, 0.50, 0.90]
 cardinality_levels = [1_000, 10_000, 100_000]
