@@ -113,20 +113,25 @@ def _build_int_value_pool(
     cardinality: int,
     seed: int,
     ensure_values: Optional[List[int]] = None,
+    ensure_non_matching: Optional[List[int]] = None,
 ) -> np.ndarray:
     """Create a pool of `cardinality` unique integer values.
 
     If `ensure_values` is provided, those values are guaranteed to be in the
     pool (useful so the predicate value is always present).
+    If `ensure_non_matching` is provided, those values are also guaranteed to
+    be in the pool (ensures non-matching values exist for selectivity < 1.0).
     """
     rng = np.random.default_rng(seed)
     ensure_values = [int(v) for v in (ensure_values or [])]
+    ensure_non_matching = [int(v) for v in (ensure_non_matching or [])]
+    all_ensured = ensure_values + ensure_non_matching
 
     # Range must cover the ensured values
-    upper = max(cardinality * 10, max(ensure_values, default=0) + cardinality)
+    upper = max(cardinality * 10, max(all_ensured, default=0) + cardinality)
 
     # Start with the guaranteed values
-    pool_set = set(ensure_values)
+    pool_set = set(all_ensured)
 
     # Fill remaining slots with random unique values
     candidates = rng.choice(upper, size=min(upper, cardinality * 20), replace=False)
@@ -181,6 +186,41 @@ def _compute_ensured_values(
             rng = np.random.default_rng(seed)
             vals = rng.choice(np.arange(lo, hi + 1), size=100, replace=False)
             return sorted(int(v) for v in vals)
+    return []
+
+
+def _compute_ensured_non_matching_values(
+    predicate_type: str,
+    predicate_value: int,
+    predicate_upper: Optional[int],
+) -> List[int]:
+    """Return up to 100 values guaranteed to NOT satisfy the predicate."""
+    if predicate_type == "equality":
+        # Values around predicate_value that are != predicate_value
+        vals = []
+        for i in range(1, 51):
+            vals.append(predicate_value + i)
+            if predicate_value - i >= 0:
+                vals.append(predicate_value - i)
+        return vals[:100]
+    elif predicate_type == "greater_than":
+        # Values <= predicate_value
+        start = max(0, predicate_value - 99)
+        return list(range(start, predicate_value + 1))
+    elif predicate_type == "less_than":
+        # Values >= predicate_value
+        return list(range(predicate_value, predicate_value + 100))
+    elif predicate_type == "range":
+        lo, hi = predicate_value, predicate_upper
+        vals = []
+        # Values below the range
+        below_start = max(0, lo - 50)
+        for v in range(below_start, lo):
+            vals.append(v)
+        # Values above the range
+        for v in range(hi + 1, hi + 51):
+            vals.append(v)
+        return vals[:100]
     return []
 
 
@@ -353,7 +393,13 @@ def _write_parquet_chunked(config: GeneratorConfig, file_idx: int, tmp_path: str
     ensure = _compute_ensured_values(
         config.predicate_type, config.predicate_value, config.predicate_upper, config.seed,
     )
-    int_pool = _build_int_value_pool(config.cardinality, config.seed, ensure_values=ensure)
+    ensure_non_match = _compute_ensured_non_matching_values(
+        config.predicate_type, config.predicate_value, config.predicate_upper,
+    )
+    int_pool = _build_int_value_pool(
+        config.cardinality, config.seed,
+        ensure_values=ensure, ensure_non_matching=ensure_non_match,
+    )
 
     # Generate the full target column (~8 bytes/row — must be global for sorting + shuffle)
     int_target = _generate_target_int_column(
