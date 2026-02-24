@@ -43,9 +43,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import io
+import gc
+import os
 import random
 import string
+import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -256,10 +258,10 @@ def _displacement_shuffle(
     if sigma == 0.0:
         return arr
     n = len(arr)
-    arr = arr.copy()
     # Choose which elements to displace
     mask = rng.random(n) < sigma
     displaced_indices = np.where(mask)[0]
+    del mask
     # For each displaced element, pick a random target position and swap
     for idx in displaced_indices:
         target = rng.integers(0, n)
@@ -271,14 +273,15 @@ def _displacement_shuffle(
 # Non-Target (Filler) Column Generation
 # ---------------------------------------------------------------------------
 
-def _generate_filler_columns(
+def _generate_filler_columns_chunk(
     n_filler: int,
-    total_rows: int,
+    chunk_rows: int,
     rng: np.random.Generator,
+    py_rng: random.Random,
 ) -> List[Tuple[str, pa.Array]]:
     """
-    Generate non-target filler columns distributed across four types:
-    int (random uniform), string (varying length), timestamp, and float.
+    Generate non-target filler columns for a single chunk of rows.
+    Distributes across four types: int, string, timestamp, and float.
     """
     if n_filler <= 0:
         return []
@@ -288,32 +291,35 @@ def _generate_filler_columns(
     assignments = [type_cycle[i % len(type_cycle)] for i in range(n_filler)]
 
     columns: List[Tuple[str, pa.Array]] = []
-    py_rng = random.Random(int(rng.integers(0, 2**31)))
 
     for i, col_type in enumerate(assignments):
         col_name = f"filler_{col_type}_{i}"
 
         if col_type == "int":
-            data = rng.integers(0, 1_000_000, size=total_rows)
+            data = rng.integers(0, 1_000_000, size=chunk_rows)
             columns.append((col_name, pa.array(data, type=pa.int64())))
+            del data
 
         elif col_type == "string":
-            lengths = rng.integers(5, 50, size=total_rows)
+            lengths = rng.integers(5, 50, size=chunk_rows)
             strs = [
                 "".join(py_rng.choices(string.ascii_letters, k=int(l)))
                 for l in lengths
             ]
             columns.append((col_name, pa.array(strs, type=pa.string())))
+            del lengths, strs
 
         elif col_type == "timestamp":
             base = datetime.datetime(2020, 1, 1)
-            offsets = rng.integers(0, 365 * 5 * 86400, size=total_rows)
+            offsets = rng.integers(0, 365 * 5 * 86400, size=chunk_rows)
             ts = [base + datetime.timedelta(seconds=int(o)) for o in offsets]
             columns.append((col_name, pa.array(ts, type=pa.timestamp("us"))))
+            del offsets, ts
 
         elif col_type == "float":
-            data = rng.uniform(-1e6, 1e6, size=total_rows)
+            data = rng.uniform(-1e6, 1e6, size=chunk_rows)
             columns.append((col_name, pa.array(data, type=pa.float64())))
+            del data
 
     return columns
 
@@ -322,9 +328,25 @@ def _generate_filler_columns(
 # Core Generator
 # ---------------------------------------------------------------------------
 
-def _generate_single_table(config: GeneratorConfig, file_idx: int) -> pa.Table:
-    """Build a single PyArrow Table according to config."""
-    # Per-file seed for reproducibility but variation across files
+def _build_schema(config: GeneratorConfig) -> pa.Schema:
+    """Build the Parquet schema from config (no data allocated)."""
+    fields = [pa.field("target_int", pa.int64())]
+    n_filler = config.table_width - 1
+    type_cycle = ["int", "string", "timestamp", "float"]
+    type_map = {
+        "int": pa.int64(),
+        "string": pa.string(),
+        "timestamp": pa.timestamp("us"),
+        "float": pa.float64(),
+    }
+    for i in range(n_filler):
+        col_type = type_cycle[i % len(type_cycle)]
+        fields.append(pa.field(f"filler_{col_type}_{i}", type_map[col_type]))
+    return pa.schema(fields)
+
+
+def _write_parquet_chunked(config: GeneratorConfig, file_idx: int, tmp_path: str) -> None:
+    """Generate data chunk-by-chunk and write row groups to a temp file."""
     rng = np.random.default_rng(config.seed + file_idx)
 
     # Value pool (shared across files for consistency)
@@ -333,7 +355,7 @@ def _generate_single_table(config: GeneratorConfig, file_idx: int) -> pa.Table:
     )
     int_pool = _build_int_value_pool(config.cardinality, config.seed, ensure_values=ensure)
 
-    # Integer target column
+    # Generate the full target column (~8 bytes/row — must be global for sorting + shuffle)
     int_target = _generate_target_int_column(
         total_rows=config.total_rows,
         value_pool=int_pool,
@@ -344,38 +366,46 @@ def _generate_single_table(config: GeneratorConfig, file_idx: int) -> pa.Table:
         clustering_ratio=config.clustering_ratio,
         rng=rng,
     )
+    del int_pool
 
-    # Build columns list
-    columns: List[Tuple[str, pa.Array]] = [
-        ("target_int", pa.array(int_target, type=pa.int64())),
-    ]
+    # Separate py_rng for filler string columns
+    py_rng = random.Random(int(rng.integers(0, 2**31)))
 
-    # Filler columns
+    schema = _build_schema(config)
     n_filler = config.table_width - 1
-    columns.extend(_generate_filler_columns(n_filler, config.total_rows, rng))
+    row_group_size = config.row_group_size
+    total = config.total_rows
 
-    # Assemble table
-    names = [c[0] for c in columns]
-    arrays = [c[1] for c in columns]
-    return pa.table(dict(zip(names, arrays)))
+    writer = pq.ParquetWriter(tmp_path, schema, write_statistics=True, version="2.6")
 
-
-def _write_parquet_to_buffer(table: pa.Table, row_group_size: int) -> pa.Buffer:
-    """Write a PyArrow table to an in-memory buffer with statistics enabled."""
-    sink = pa.BufferOutputStream()
-    writer = pq.ParquetWriter(
-        sink,
-        table.schema,
-        write_statistics=True,
-        version="2.6",
-    )
-    # Write in chunks to control row group size
-    total = table.num_rows
     for start in range(0, total, row_group_size):
         end = min(start + row_group_size, total)
-        writer.write_table(table.slice(start, end - start))
+        chunk_rows = end - start
+
+        # Slice target column for this chunk
+        target_chunk = int_target[start:end]
+
+        # Generate filler columns only for this chunk
+        filler_cols = _generate_filler_columns_chunk(n_filler, chunk_rows, rng, py_rng)
+
+        # Build chunk table
+        columns: List[Tuple[str, pa.Array]] = [
+            ("target_int", pa.array(target_chunk, type=pa.int64())),
+        ]
+        columns.extend(filler_cols)
+        names = [c[0] for c in columns]
+        arrays = [c[1] for c in columns]
+        chunk_table = pa.table(dict(zip(names, arrays)))
+
+        writer.write_table(chunk_table)
+
+        # Free chunk memory
+        del target_chunk, filler_cols, columns, names, arrays, chunk_table
+        gc.collect()
+
     writer.close()
-    return sink.getvalue()
+    del int_target
+    gc.collect()
 
 
 # ---------------------------------------------------------------------------
@@ -383,17 +413,17 @@ def _write_parquet_to_buffer(table: pa.Table, row_group_size: int) -> pa.Buffer:
 # ---------------------------------------------------------------------------
 
 def validate_parquet(
-    buf: pa.Buffer,
+    file_path: str,
     s3_key: str,
     config: GeneratorConfig,
 ) -> None:
     """
-    Read metadata of a written Parquet buffer and print validation info:
+    Read metadata of a written Parquet file and print validation info:
       - Number of row groups and their sizes
       - Min/max stats for target columns per row group
       - Actual vs requested selectivity
     """
-    pf = pq.ParquetFile(pa.BufferReader(buf))
+    pf = pq.ParquetFile(file_path)
     metadata = pf.metadata
     n_groups = metadata.num_row_groups
 
@@ -434,13 +464,13 @@ def validate_parquet(
 # S3 Upload
 # ---------------------------------------------------------------------------
 
-def upload_to_s3(buf: pa.Buffer, filename: str, bucket: str, prefix: str) -> str:
-    """Upload a Parquet buffer to S3 and return the S3 URI."""
+def upload_to_s3(file_path: str, filename: str, bucket: str, prefix: str) -> str:
+    """Upload a Parquet file to S3 and return the S3 URI."""
     import boto3
 
     s3 = boto3.client("s3")
     key = f"{prefix.rstrip('/')}/{filename}" if prefix else filename
-    s3.upload_fileobj(io.BytesIO(buf.to_pybytes()), bucket, key)
+    s3.upload_file(file_path, bucket, key)
     uri = f"s3://{bucket}/{key}"
     print(f"  Uploaded → {uri}")
     return uri
@@ -463,15 +493,21 @@ def generate_parquet_files(config: GeneratorConfig) -> List[str]:
         s3_key = f"{config.s3_prefix.rstrip('/')}/{filename}" if config.s3_prefix else filename
 
         print(f"\n[File {i+1}/{config.num_files}] Generating {config.total_rows} rows …")
-        table = _generate_single_table(config, file_idx=i)
 
-        print(f"  Writing to buffer (row_group_size={config.row_group_size}) …")
-        buf = _write_parquet_to_buffer(table, config.row_group_size)
+        fd, tmp_path = tempfile.mkstemp(suffix=".parquet")
+        os.close(fd)
+        try:
+            print(f"  Writing to temp file (row_group_size={config.row_group_size}) …")
+            _write_parquet_chunked(config, file_idx=i, tmp_path=tmp_path)
 
-        # validate_parquet(buf, s3_key, config)
+            # validate_parquet(tmp_path, s3_key, config)
 
-        uri = upload_to_s3(buf, filename, config.s3_bucket, config.s3_prefix or "")
-        uris.append(uri)
+            uri = upload_to_s3(tmp_path, filename, config.s3_bucket, config.s3_prefix or "")
+            uris.append(uri)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            gc.collect()
 
     print(f"\nDone. Generated {len(uris)} file(s) → s3://{config.s3_bucket}/{config.s3_prefix or ''}")
     return uris
