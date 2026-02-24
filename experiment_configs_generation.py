@@ -6,17 +6,18 @@ import boto3
 import numpy as np
 from scipy.stats.qmc import LatinHypercube
 
-n_configs = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+n_configs = int(sys.argv[1]) if len(sys.argv) > 1 else 90
 
 sampler = LatinHypercube(d=5, seed=42)
 sample = sampler.random(n=n_configs)
 
 # Map each dimension back to your discrete levels
-clustering_levels = [0.0, 1.0]
-selectivity_levels = [0.01, 0.05, 0.20, 0.50, 0.90]
-cardinality_levels = [1_000, 10_000, 100_000, 1_000_000]
-row_group_levels = [10_000, 50_000, 100_000, 500_000]
-predicate_levels = ["equality", "greater_than", "less_than", "range"]
+# Total combinations: 720
+clustering_levels = [0.0, 0.25, 0.5, 0.75, 1.0]
+selectivity_levels = [0.05, 0.20, 0.50, 0.90]
+cardinality_levels = [1_000, 10_000, 100_000]
+row_group_levels = [10_000, 50_000, 100_000, 250_000]
+predicate_levels = ["equality", "less_than", "range"]
 
 def map_to_level(unit_val, levels):
     idx = int(unit_val * len(levels))
