@@ -2,3 +2,6 @@ pyarrow
 numpy
 boto3
 scipy
+shap
+scikit-learn
+matplotlib
