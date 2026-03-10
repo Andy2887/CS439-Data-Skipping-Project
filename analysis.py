@@ -2,8 +2,9 @@
 analysis.py — Gradient Boosted Regression & SHAP Analysis for Data Skipping Benchmarks
 
 Fetches experiment results from S3, trains a GradientBoostingRegressor to predict
-the skip rate, and uses SHAP values to quantify how clustering ratio, selectivity,
-cardinality, row group size, and predicate type influence skipping effectiveness.
+the performance ratio R = T_skip / T_scan, and uses SHAP values to quantify how
+clustering ratio, selectivity, cardinality, row group size, and predicate type
+influence the relative cost of data skipping vs sequential scanning.
 
 Usage:
     python analysis.py s3://cs439-project-bucket/result/20260225_154602/results.csv
@@ -12,8 +13,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import io
 import os
+import io
 import sys
 import warnings
 from urllib.parse import urlparse
@@ -74,19 +75,19 @@ def prepare_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, LabelEncode
     """
     Prepare features and target for modeling.
 
-    Target: skip_rate = skip_groups_skipped / total_groups
+    Target: R = T_skip / T_scan (performance ratio; R > 1 means skipping is slower)
     Features: clustering_ratio, selectivity, cardinality, row_group_size, predicate_type
     """
     # Drop rows with errors
     if "error" in df.columns:
         df = df[df["error"].isna() | (df["error"] == "")].copy()
 
-    # Compute total groups and skip rate
+    # Compute auxiliary columns
     df["total_groups"] = df["skip_groups_read"] + df["skip_groups_skipped"]
     df["skip_rate"] = df["skip_groups_skipped"] / df["total_groups"]
     df["skip_rate"] = df["skip_rate"].fillna(0.0)
 
-    # Also compute performance ratio R for reference
+    # Compute performance ratio R = T_skip / T_scan
     df["R"] = df["skip_avg_execution_time"] / df["noskip_avg_execution_time"]
 
     # Encode predicate_type as integer
@@ -103,14 +104,15 @@ def prepare_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, LabelEncode
     ]
     X = df[feature_cols_encoded].copy()
     X.columns = FEATURE_COLS  # Use original names for readability
-    y = df["skip_rate"]
+    y = df["R"]
 
-    print(f"\n--- Target: skip_rate ---")
+    print(f"\n--- Target: R = T_skip / T_scan ---")
     print(f"  Mean:   {y.mean():.4f}")
     print(f"  Median: {y.median():.4f}")
     print(f"  Min:    {y.min():.4f}")
     print(f"  Max:    {y.max():.4f}")
     print(f"  Std:    {y.std():.4f}")
+    print(f"  (R > 1.0 means skipping is slower than scanning)")
 
     return X, y, le, df
 
@@ -169,7 +171,7 @@ def run_shap_analysis(
     output_prefix: str = "shap",
 ) -> None:
     """Compute SHAP values and generate plots."""
-    os.makedirs(output_prefix, exist_ok=True)
+    os.makedirs("shap", exist_ok=True)
     print(f"\n--- Computing SHAP Values ---")
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
@@ -185,22 +187,22 @@ def run_shap_analysis(
     # ---- Plot 1: SHAP Summary (Beeswarm) ----
     fig, ax = plt.subplots(figsize=(10, 6))
     shap.summary_plot(shap_values, X, feature_names=FEATURE_COLS, show=False)
-    plt.title("SHAP Summary Plot — Impact on Skip Rate", fontsize=14)
+    plt.title("SHAP Summary Plot — Impact on R (T_skip / T_scan)", fontsize=14)
     plt.tight_layout()
-    plt.savefig(f"{output_prefix}/summary.png", dpi=150, bbox_inches="tight")
+    plt.savefig(f"shap/{output_prefix}_summary.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_prefix}/summary.png")
+    print(f"  Saved: shap/{output_prefix}_summary.png")
 
     # ---- Plot 2: SHAP Bar Plot (Mean |SHAP|) ----
     fig, ax = plt.subplots(figsize=(8, 5))
     shap.summary_plot(
         shap_values, X, feature_names=FEATURE_COLS, plot_type="bar", show=False
     )
-    plt.title("Mean |SHAP| — Feature Importance for Skip Rate", fontsize=14)
+    plt.title("Mean |SHAP| — Feature Importance for R (T_skip / T_scan)", fontsize=14)
     plt.tight_layout()
-    plt.savefig(f"{output_prefix}/bar.png", dpi=150, bbox_inches="tight")
+    plt.savefig(f"shap/{output_prefix}_bar.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_prefix}/bar.png")
+    print(f"  Saved: shap/{output_prefix}_bar.png")
 
     # ---- Plot 3: Individual SHAP Dependence Plots ----
     for i, feat in enumerate(FEATURE_COLS):
@@ -215,7 +217,7 @@ def run_shap_analysis(
         )
         ax.set_title(f"SHAP Dependence — {feat}", fontsize=13)
         plt.tight_layout()
-        fname = f"{output_prefix}/dep_{feat}.png"
+        fname = f"shap/{output_prefix}_dep_{feat}.png"
         plt.savefig(fname, dpi=150, bbox_inches="tight")
         plt.close()
         print(f"  Saved: {fname}")
@@ -282,7 +284,7 @@ def main() -> None:
     # SHAP analysis
     run_shap_analysis(model, X, le, output_prefix=args.output_prefix)
 
-    print(f"\nDone. All plots saved in '{args.output_prefix}/'.")
+    print(f"\nDone. All plots saved in shap/ with prefix '{args.output_prefix}_'.")
 
 
 if __name__ == "__main__":
