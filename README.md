@@ -18,6 +18,11 @@ python writer.py \
     --predicate-value 42 \
     --s3-bucket cs439-project-bucket \
     --s3-prefix experiments/run1
+
+# Path to phase 1 results
+s3://cs439-project-bucket/result/20260225_154602/results.csv
+# Path to phase 2 results
+s3://cs439-project-bucket/result/20260311_005917/results.csv
 ```
 
 ## File Size
