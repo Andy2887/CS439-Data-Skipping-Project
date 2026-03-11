@@ -51,20 +51,24 @@ def run_query(s3_path, query_type, value1, value2, data_skipping, num_runs=3):
             pf = pq.ParquetFile(s3.open_input_file(path))
             metadata = pf.metadata
             num_row_groups = metadata.num_row_groups
+            col_name = metadata.row_group(0).column(0).path_in_schema
 
-            for i in range(num_row_groups):
-                if data_skipping:
+            if data_skipping:
+                for i in range(num_row_groups):
                     stats = metadata.row_group(i).column(0).statistics
                     if should_skip(stats, query_type, value1, value2):
                         groups_skipped += 1
                         continue
 
-                table = pf.read_row_group(
-                    i, columns=[metadata.row_group(i).column(0).path_in_schema]
-                )
+                    table = pf.read_row_group(i, columns=[col_name])
+                    col = table.column(0).to_pylist()
+                    total_count += sum(1 for v in col if matches(v, query_type, value1, value2))
+                    groups_read += 1
+            else:
+                table = pf.read(columns=[col_name])
                 col = table.column(0).to_pylist()
                 total_count += sum(1 for v in col if matches(v, query_type, value1, value2))
-                groups_read += 1
+                groups_read += num_row_groups
 
         elapsed = time.time() - start
         execution_times.append(elapsed)

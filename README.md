@@ -22,7 +22,7 @@ python writer.py \
 # Path to phase 1 results
 s3://cs439-project-bucket/result/20260225_154602/results.csv
 # Path to phase 2 results
-s3://cs439-project-bucket/result/20260311_005917/results.csv
+s3://cs439-project-bucket/result/20260311_144509/results.csv
 ```
 
 ## File Size
