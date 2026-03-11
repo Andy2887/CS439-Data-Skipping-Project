@@ -5,21 +5,21 @@ import itertools
 import boto3
 import numpy as np
 
-clustering_levels = [0.02, 0.05, 0.08, 0.1]
+CLUSTERING_RATIO = 0
 selectivity_levels = [0.05, 0.20, 0.50, 0.90]
-row_group_levels = [10_000, 50_000, 100_000, 250_000]
+row_group_levels = [5_000, 10_000, 50_000, 100_000, 250_000]
 
 CARDINALITY = 10_000
 PREDICATE_TYPE = "less_than"
 
 rng = np.random.default_rng(42)
 configs = []
-for clustering, selectivity, row_group in itertools.product(
-    clustering_levels, selectivity_levels, row_group_levels
+for selectivity, row_group in itertools.product(
+    selectivity_levels, row_group_levels
 ):
     v1 = int(rng.integers(0, 10_000_001))
     configs.append({
-        "clustering_ratio": clustering,
+        "clustering_ratio": CLUSTERING_RATIO,
         "selectivity": selectivity,
         "cardinality": CARDINALITY,
         "row_group_size": row_group,
