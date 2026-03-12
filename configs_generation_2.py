@@ -6,11 +6,11 @@ import boto3
 import numpy as np
 
 CLUSTERING_RATIO = 0
-selectivity_levels = [0.05, 0.20, 0.50, 0.90]
-row_group_levels = [5_000, 10_000, 50_000, 100_000, 250_000]
+selectivity_levels = [0.05, 0.20, 0.40, 0.50, 0.60, 0.80]
+row_group_levels = [2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000]
 
 CARDINALITY = 10_000
-PREDICATE_TYPE = "less_than"
+PREDICATE_TYPE = "equality"
 
 rng = np.random.default_rng(42)
 configs = []

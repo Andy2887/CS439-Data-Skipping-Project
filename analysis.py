@@ -10,7 +10,7 @@ Features are selected via --features. If predicate_type is included it is
 automatically label-encoded.
 
 Usage:
-    python analysis.py s3://bucket/path/results.csv --features clustering_ratio selectivity row_group_size
+    python analysis.py s3://bucket/path/results.csv --features selectivity row_group_size
     python analysis.py s3://bucket/path/results.csv --features clustering_ratio selectivity cardinality row_group_size predicate_type
 """
 
